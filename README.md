@@ -33,17 +33,13 @@ Code for Epigenetic Age and Long-Term Cancer Risk Following a Stroke
 - dplyr_1.1.3
 - tidyr_1.3.0
 - stringr_1.5.0
-
 - survminer_0.4.9
 - tidycmprsk_0.2.0
 - survival_3.5-8
-
 - Hmisc_5.1-1
 - compareGroups_4.7.1
- 
 - kableExtra_1.3.4.9000
 - knitr_1.44
-
 - ggpubr_0.6.0
 - ggplot2_3.5.0   
 
