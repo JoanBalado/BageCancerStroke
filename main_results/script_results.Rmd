@@ -1,0 +1,1205 @@
+---
+title: "script results"
+output: html_document
+date: "2024-10-29"
+---
+
+# Libraries
+
+```{r message=FALSE, warning=FALSE}
+# data visualization
+library(ggplot2)
+library(survminer)
+# Data management
+library(dplyr)
+library(tidyr)
+library(stringr)
+# kable
+library(knitr)
+library(kableExtra)
+# data analysis
+library(compareGroups)
+library(Hmisc)
+library(survival)
+library(tidycmprsk)
+# functions
+blue0.5 <- scales::alpha('dodgerblue', .5)
+explore_df <- function(df){
+  aux <- dim(df)
+  msg <- paste0('Data-frame has: \n', '\tRows: ', aux[1], '\n\tCols: ', aux[2])
+  message(msg)
+}
+hist_fun <- function(x, data){
+  hist(data[,x], main = x, freq = F, col = blue0.5)
+  lines(density(data[,x], na.rm = T), col = 'red',)
+}
+knitr::knit_hooks$set(
+   error = function(x, options) {
+     paste('\n\n<div class="alert alert-danger">',
+           gsub('##', '\n', gsub('^##\ Error', '**Error**', x)),
+           '</div>', sep = '\n')
+   },
+   warning = function(x, options) {
+     paste('\n\n<div class="alert alert-warning">',
+           gsub('##', '\n', gsub('^##\ Warning:', '**Warning**', x)),
+           '</div>', sep = '\n')
+   },
+   message = function(x, options) {
+     paste('\n\n<div class="alert alert-info">',
+           gsub('##', '\n', x),
+           '</div>', sep = '\n')
+   }
+)
+# explore tab
+explor_tab <- function(df, lab){
+  lab <- paste0('<center><strong>', lab, '</strong></center>')
+  df %>%
+    kable(., align = rep('c', ncol(.)), caption = lab) %>%
+    kable_classic_2(., html_font = 'cambria', full_width = F)
+}
+# histogram
+hist_fun <- function(x, df, ...){
+  tmp <- df[,x]
+  aux <- as.numeric(quantile(tmp, prob = c(.25, .5, .75), na.rm = T))
+  hist(tmp, main = x, freq = F, col = blue0.5, ...)
+  lines(density(tmp, na.rm = T), col = 'firebrick', lwd = 1)
+  abline(v = aux[1], col = 'firebrick', lwd = 1, lty = 'dashed')
+  abline(v = aux[2], col = 'firebrick', lwd = 1, lty = 'dashed')
+  abline(v = aux[3], col = 'firebrick', lwd = 1, lty = 'dashed')
+}
+KM_function_factors <- function(x, data, surv_object, t){
+  # The idea is the same as in the previous case. 
+  object <- survfit(surv_object ~ data[,x])
+  summy <- summary(object, times = t)
+  survy <- 1-summy$surv
+  survy <- round(survy, 2)
+  erry <- summy$std.err
+  sdf <- survdiff(surv_object~data[,x])
+  
+  # get p-values
+  p.val <- 1 - pchisq(sdf$chisq, length(sdf$n)-1)
+  p.val <- round(p.val, digits = 5)
+  
+  # construct survival curves
+  surv <- paste0(survy, ' (', round(survy-erry*1.96, 2), ';', round(survy+erry*1.96, 2), ')')
+  p.val <- rep(p.val, length(surv))
+  lab <- rep(x, length(surv))
+  out <- cbind(lab, levels(data[,x]), surv, p.val)
+  
+  return(out)
+}
+
+CI_function_factors <- function(time, event, pred, data, t){
+  # first we build the formula 
+  f <- as.formula(paste0('Surv(', time, ', factor(', event, '))~', pred))
+  # run cuminc
+  tmp <- cuminc(f, df)
+  # select results of interes
+  if(is.null(t)){
+    tmp_t <- na.omit(tmp$tidy)
+    tmp_t <- tmp_t %>%
+      group_by(outcome, strata) %>%
+      slice_max(time)
+  } else {
+    tmp_t <- subset(tmp$tidy, tmp$tidy$time == t)
+  }
+  
+  tmp_t <- tmp_t %>% 
+    arrange(outcome, strata) %>%
+    select(outcome, strata, estimate, conf.low, conf.high, cum.event, time) %>%
+    mutate(incidence = paste0(round(estimate*100, 1), 
+                              ' (', 
+                              round(conf.low*100, 1),
+                              ';', 
+                              round(conf.high*100, 1),
+                              ')')) %>%
+    mutate(variable = pred) %>%
+    select(outcome, variable, strata, incidence, cum.event, time)
+  # calculate pvals
+  tmp_p <- data.frame(tmp$cmprsk$Tests)
+  tmp_p$outcome <- row.names(tmp_p)
+  tmp_p <- tmp_p[,c('outcome', 'pv')]
+  # merge and return
+  tmp_t <- merge(tmp_t, tmp_p, all.x = T, by = 'outcome')
+  tmp_t$pv[duplicated(tmp_t$pv)] <- NA
+  return(tmp_t)
+}
+run_series_ci <- function(time, event, data, t=NULL, vars, lab, report = T){
+  # ensure all variables are factors
+  for(var in vars) df[,var] <- factor(df[,var])
+  m <- NULL
+  # iterate for each var
+  for(var in vars){
+    # run KM
+    tmp <- CI_function_factors(time, event, var, data, t)
+    if(is.null(m)) m <- tmp
+    else m <- rbind(m, tmp)
+  }
+  # report results
+  m <- data.frame(m)
+  m <- m %>% arrange(., outcome, variable, strata)
+  Q <- tapply(m$pv, m$outcome, p.adjust, method = 'fdr')
+  m$pv <- as.character(m$pv)
+  m$pv[is.na(m$pv)] <- ''
+  m$Q <- c(Q[[1]], Q[[2]])
+  m$Q <- as.character(m$Q)
+  m$Q[is.na(m$Q)] <- ''
+  colnames(m) <- c('Outcome', 'Variable', 'Group', 'Incidence (95%CI)', 'CumEvents', 'Time', 'p-val', 'Q-val')
+
+  if(report){
+    m %>%
+      select('Outcome', 'Variable', 'Group', 'Incidence (95%CI)', 'CumEvents', 'Time', 'p-val', 'Q-val') %>%
+      mutate(Outcome = factor(Outcome, levels = 1:2, labels = c('Study Event', 'Competing Event'))) %>%
+      kable(align = rep('c', ncol(.)), 
+            caption = paste_nice(paste0('Effect of ', lab, ' on incidence'))) %>%
+      kable_classic_2(full_width = F,  html_font = 'cambria') %>%
+      collapse_rows(columns = 1:2, valign = 'top')
+  } else return(m)
+}
+
+run_series_km <- function(df, surv_object, vars, lab, t = 10, report = T){ # >>>> change censor time!!!!! <<<<<
+  # ensure all variables are factors
+  for(var in vars) df[,var] <- factor(df[,var])
+  m <- NULL
+  # iterate for each var
+  for(var in vars){
+    # run KM
+    tmp <- KM_function_factors(var, df, surv_object, t)
+    if(is.null(m)) m <- tmp
+    else m <- rbind(m, tmp)
+  } 
+  # report results
+  m <- data.frame(m)
+  m$p.val[duplicated(m$p.val)] <- NA
+  m$Q <- p.adjust(m$p.val, method = 'fdr')
+  m$p.val <- as.character(m$p.val)
+  m$p.val[is.na(m$p.val)] <- ''
+  m$Q <- as.character(m$Q)
+  m$Q[is.na(m$Q)] <- ''
+  colnames(m) <- c('lab', 'Group', '1-(Survival-Rate)', 'p-val', 'Q-val')
+  m <- m[order(m$lab),]
+  row.names(m) <- NULL
+  if(report){
+    m %>%
+    select('Group', '1-(Survival-Rate)', 'p-val', 'Q-val') %>%
+    kable(align = rep('c', ncol(.)), 
+          caption = paste_nice(paste0('Effect of ', lab, ' on events rate (1-surv)'))) %>%
+    kable_classic_2(full_width = F,  html_font = 'cambria') %>%
+    pack_rows(index = table(m$lab))
+  } else return(m)
+}
+# nice titles
+paste_nice <- function(x){
+  x <- paste0('<center><strong>', x, '</center></strong>')
+}
+# report calss variables. 
+check_class_vars <- function(df){
+  msg <- c()
+  for(var in names(df)){
+    msg <- paste0(msg, paste0(var, ': ', class(df[,var])), '\n')
+  }
+  message(msg)
+}
+# report proportion of NAs per variable
+prop_nas_fun <- function(df){
+  msg <- c()
+  for(var in names(df)){
+    aux1 <- sum(is.na(df[,var]))
+    aux2 <- round(aux1/nrow(df)*100, 2)
+    msg <- paste0(msg, paste0(var, ': ', aux1, ' (', aux2, '%)'), '\n')
+  }
+  message(msg)
+}
+# univ cox
+series_cox_univ <- function(df, surv_object, vars, lab){
+  m <- NULL
+  for(var in vars){
+    f <- as.formula(paste0(surv_object, '~', var))
+    m1 <- coxph(f, df)
+    coefs <- round(summary(m1)$coefficients, 3)
+    ci <- round(exp(confint(m1)), 3)
+    hr_ci <- paste0(coefs[1,2], ' (', ci[1], ';', ci[2], ')')
+    p <- coefs[1,5]
+    n1 <- nobs(m1)
+    n2 <- summary(m1)$n
+    out <- c(var, hr_ci, p, n1, n2)
+    if(is.null(m)) m <- out
+    else m <- rbind(m, out)
+  }
+  m <- data.frame(m)
+  names(m) <- c('Predictor', 'HR (95% CI)', 'p-value', 'Events', 'N-model(total)')
+  m$`p-value` <- as.numeric(as.character(m$`p-value`))
+  m$`Q-value` <- p.adjust(m$`p-valueWARNING :  GTExv8.EUR.Whole_Blood GTExv8.EUR.Whole_Blood/ENSG00000253818.1.wgt.RDat ENSG00000253818.1 22 22404206 22404207 558 had mean GWAS Z-score imputation r2 of 0.5838016 at expression weight SNPs, skipping this gene.
+`, method = 'fdr')
+  row.names(m) <- NULL
+  m %>%
+    kable(., align = rep('c', ncol(.)), 
+          caption = paste_nice(paste0('Effect of ', lab, ' on incidence of Events'))) %>%
+    kable_classic_2(html_font = 'cambria', full_width = F)
+}
+
+# multiv cox
+series_cox_multi <- function(df, surv_object, vars, cov, lab, report=T){
+  m <- NULL
+  for(var in vars){
+    if(is.null(cov)){
+      f <- as.formula(paste0(surv_object, '~', var))
+    } else {
+      cov <- paste(cov, collapse = '+')
+      f <- as.formula(paste0(surv_object, '~', var, '+', cov))
+    }
+    
+    m1 <- coxph(f, df)
+    coefs <- round(summary(m1)$coefficients, 4)
+    ci <- round(exp(confint(m1)), 4)
+    hr_ci <- paste0(coefs[1,2], ' (', ci[1,1], ';', ci[1,2], ')')
+    p <- coefs[1,5]
+    out <- c(var, hr_ci, p)
+    if(is.null(m)) m <- out
+    else m <- rbind(m, out)
+  }
+  m <- data.frame(m)
+  names(m) <- c('Predictor', 'HR (95% CI)', 'p-value')
+  m$`p-value` <- as.numeric(as.character(m$`p-value`))
+  m$`Q-value` <- p.adjust(m$`p-value`, method = 'fdr')
+  row.names(m) <- NULL
+  if(report){
+    m %>%
+    kable(., align = rep('c', ncol(.)), 
+          caption = paste_nice(paste0('Effect of ', lab, ' on incidence of Events'))) %>%
+    kable_classic_2(html_font = 'cambria', full_width = F)
+  } else {
+    return(m)
+  }
+}
+
+# multiv cox
+series_fineGray_multi <- function(df, time, event, vars, cov, lab, report=T){
+  m <- NULL
+  df[,event] <- factor(df[,event])
+  surv_object <- paste0('Surv(', time, ',', event, ')')
+  for(var in vars){
+    
+    if(is.null(cov)){
+      f <- as.formula(paste0(surv_object, '~', var))
+    } else {
+      cov <- paste(cov, collapse = '+')
+      f <- as.formula(paste0(surv_object, '~', var, '+', cov))
+    }
+    m1 <- data.frame(crr(f, df)$tidy)
+    coefs <- round(exp(m1$estimate), 4)[1]
+    ci_low <- round(exp(m1$conf.low), 4)[1]
+    ci_high <- round(exp(m1$conf.high), 4)[1]
+    hr_ci <- paste0(coefs, ' (', ci_low, ';', ci_high, ')')
+    p <- round(m1$p.value, 4)[1]
+    out <- c(var, hr_ci, p)
+    if(is.null(m)) m <- out
+    else m <- rbind(m, out)
+  }
+  m <- data.frame(m)
+  names(m) <- c('Predictor', 'HR (95% CI)', 'p-value')
+  m$`p-value` <- as.numeric(as.character(m$`p-value`))
+  m$`Q-value` <- p.adjust(m$`p-value`, method = 'fdr')
+  row.names(m) <- NULL
+  if(report){
+    m %>%
+    kable(., align = rep('c', ncol(.)), 
+          caption = paste_nice(paste0('Effect of ', lab, ' on incidence of Events'))) %>%
+    kable_classic_2(html_font = 'cambria', full_width = F)
+  } else {
+    return(m)
+  }
+}
+check_unique_values <- function(df, var){
+  # given a variable and a dataset reports the unique values of a specific variable
+  x <- df[,var]
+  msg <- paste0('Showing unique values variable ', var, ':\n')
+  K <- unique(x)
+  for(k in K) msg <- paste0(msg, paste0('\t', k, '\n'))
+  message(msg)
+}
+
+theme_paper <- theme_classic() +
+  theme(axis.text = element_text(color = 'black', size = 12), 
+        axis.title = element_text(color = 'black', size = 13),
+        strip.text = element_text(color = 'black', size = 13)) 
+theme_paper2 <- theme_classic() +
+  theme(axis.text = element_text(color = 'black', size = 14), 
+        axis.title = element_text(color = 'black', size = 16),
+        strip.text = element_text(color = 'black', size = 16)) 
+```
+
+# Load data
+
+```{r}
+df <- data.frame(data.table::fread('input/pheno.csv'))
+```
+
+# Descriptive analysis: 
+
+## Age acceleration
+
+Cases with an age acceleration higher than |3SDs| were trimmed to min/max (3SD): 
+
+Now let's take a look to age acceleration (intrinsic) in the main clocks: 
+
+```{r, fig.width=9, fig.height=6, fig.align='center'}
+par(mfrow = c(2,3))
+clocks_main <- c('Hannum', 'Horvath', 'BLUP', 'EN', 'Levine')
+plyr::l_ply(paste0('ageAcc2.', clocks_main), hist_fun, df)
+```
+
+And Cancer clocks (cancer risk):
+
+```{r, fig.width=9, fig.height=3, fig.align='center'}
+clocks_cancer <- str_subset(names(df), 'Epitoc|EPITOC')
+par(mfrow = c(1,3))
+plyr::l_ply(clocks_cancer, hist_fun, df)
+```
+
+## Fig2-A
+
+Figure for paper: 
+
+```{r}
+dir.create('output')
+clocks <- c('ageAcc2.Hannum', 
+            'ageAcc2.Horvath', 
+            'ageAcc2.Levine',
+            'ageAcc2.BLUP',
+            'ageAcc2.EN',
+            'ageAcc4.Hannum', 
+            'ageAcc4.Horvath', 
+            'ageAcc4.Levine',
+            'ageAcc4.BLUP', 
+            'ageAcc4.EN')
+
+
+theme_paper2 <- theme_classic() +
+  theme(axis.text = element_text(color = 'black', size = 14), 
+        axis.title = element_text(color = 'black', size = 16),
+        strip.text = element_text(color = 'black', size = 16)) 
+
+plt <- df %>%
+  select(clocks, Sample_Name) %>%
+  tidyr::pivot_longer( cols = clocks) %>%
+  separate(col = name, into = c('meas', 'clock'), sep = '[.]') %>%
+  mutate(clock = factor(clock, 
+                        levels = c('Hannum',
+                                   'Horvath',
+                                   'Levine',
+                                   'BLUP', 
+                                   'EN'),
+                       labels = c('Hannum', 
+                                  'Horvath', 
+                                  'PhenoAge', 
+                                  'Zhang-BLUP', 
+                                  'Zhang-EN')),
+         meas = factor(meas, 
+                        levels = c('ageAcc2',
+                                   'ageAcc4'),
+                        labels = c('EEAA', 
+                                   'IEAA'))) %>%
+  ggplot(., aes(x = value, fill = interaction( meas, clock), linetype = meas)) +
+  geom_density(alpha = .3, color = 'black', linewidth = .6) +
+  scale_linetype_manual(values = c('solid', 'dashed', 'solid')) +
+  facet_wrap(meas~clock, scales = 'free', nrow =2 ) +
+  ylab('Density') + xlab('Age acceleration/epiTOC') +
+  scale_fill_brewer(palette = 'Paired') +
+  theme_paper2 +
+  geom_vline(mapping = aes(xintercept = 0), color = 'firebrick') +
+  theme(legend.position = 'none')
+    
+png('output/fig2a.png', res = 600, width = 14, height = 5, units = 'in')
+print(plt)
+dev.off()  
+```
+
+**Change** Epitoc
+
+```{r}
+clocks <- c('Epitoc.Epitoc', 
+            'Epitoc.ageAcc2Epitoc')
+
+plt <- df %>%
+  select(clocks, Sample_Name) %>%
+  tidyr::pivot_longer( cols = clocks) %>%
+  separate(col = name, into = c('meas', 'clock'), sep = '[.]') %>%
+  mutate(clock = factor(clock, 
+                        levels = c('Epitoc',
+                                   'ageAcc2Epitoc'),
+                       labels = c('Raw', 
+                                  'Age-ajusted')),
+         meas = factor(meas, 
+                        levels = c('Epitoc'),
+                        labels = c('Epitoc'))) %>%
+  ggplot(., aes(x = value, fill = interaction( meas, clock), linetype = clock)) +
+  geom_density(alpha = .3, color = 'black', linewidth = .6) +
+  scale_linetype_manual(values = c('solid', 'dashed', 'solid')) +
+  facet_wrap(meas~clock, scales = 'free', nrow =2) +
+  ylab('Density') + xlab('Age acceleratio/epiTOC') +
+  scale_fill_manual(values = c("#FFFF99", "#B15928")) +
+  theme_paper2 +
+  geom_vline(mapping = aes(xintercept = 0), color = 'firebrick') +
+  theme(legend.position = 'none')
+    
+png('output/fig2aEpitoc.png', res = 600, width = 3, height = 5, units = 'in')
+print(plt)
+dev.off()  
+```
+
+## SuppFig S1
+
+Let's check by batch:
+
+```{r }
+plt <- df %>%
+  select(ageAcc2.Hannum, ageAcc2.Horvath, ageAcc2.Levine, 
+         ageAcc2.BLUP, ageAcc2.EN, Array_type) %>%
+  tidyr::pivot_longer(cols = c('ageAcc2.Hannum', 'ageAcc2.Horvath', 'ageAcc2.Levine',
+                                  'ageAcc2.BLUP', 'ageAcc2.EN',)) %>%
+  mutate(name = factor(name, 
+                       levels = c('ageAcc2.Hannum', 'ageAcc2.Horvath', 'ageAcc2.Levine',
+                                  'ageAcc2.BLUP', 'ageAcc2.EN'),
+                       labels = c('Hannum EEAA', 'Horvath EEAA', 'PhenoAge EEAA', 
+                                  'Zhang-BLUP EEAA', 'Zhang-EN EEAA'))) %>%
+  ggplot(., aes(x = value, fill = Array_type, color = Array_type)) +
+  geom_histogram(aes(y = ..density..), color = 'black', fill = 'white', alpha = .85) +
+  geom_density(alpha = .3, linewidth = .6) +
+  facet_wrap(~name, scales = 'free') +
+  scale_fill_manual(values = c('dodgerblue', '#FFAB1F')) +
+  scale_color_manual(values = c('dodgerblue', '#FFAB1F')) +
+  ylab('Density') + xlab('Age acceleration') +
+  scale_y_continuous(expand = expansion(mult = c(.02, 0.2))) +
+  theme_paper +
+  theme(legend.position = 'bottom')
+  
+png('output/SuppFigS1.png', res = 600, width = 7, height = 4, units = 'in')
+print(plt)
+dev.off()
+```
+
+
+## SuppFig S2 
+
+
+```{r }
+plt <- df %>%
+  select(ageAcc4.Hannum, ageAcc4.Horvath, ageAcc4.Levine, 
+         ageAcc4.BLUP, ageAcc4.EN, Array_type) %>%
+  tidyr::pivot_longer(cols = c('ageAcc4.Hannum', 'ageAcc4.Horvath', 'ageAcc4.Levine',
+                                  'ageAcc4.BLUP', 'ageAcc4.EN',)) %>%
+  mutate(name = factor(name, 
+                       levels = c('ageAcc4.Hannum', 'ageAcc4.Horvath', 'ageAcc4.Levine',
+                                  'ageAcc4.BLUP', 'ageAcc4.EN'),
+                       labels = c('Hannum IEAA', 'Horvath IEAA', 'PhenoAge IEAA', 
+                                  'Zhang-BLUP IEAA', 'Zhang-EN IEAA'))) %>%
+  ggplot(., aes(x = value, fill = Array_type, color = Array_type)) +
+  geom_histogram(aes(y = ..density..), color = 'black', fill = 'white', alpha = .85) +
+  geom_density(alpha = .3, linewidth = .6) +
+  facet_wrap(~name, scales = 'free') +
+  scale_fill_manual(values = c('dodgerblue', '#FFAB1F')) +
+  scale_color_manual(values = c('dodgerblue', '#FFAB1F')) +
+  ylab('Density') + xlab('Age acceleration') +
+  scale_y_continuous(expand = expansion(mult = c(.02, 0.2))) +
+  theme_paper +
+  theme(legend.position = 'bottom')
+  
+png('output/SuppFigS2.png', res = 600, width = 7, height = 4, units = 'in')
+print(plt)
+dev.off()
+```
+
+## Fig S3
+
+```{r }
+plt <- df %>%
+  select(Epitoc.Epitoc, Epitoc.ageAcc2Epitoc, Array_type) %>%
+  tidyr::pivot_longer(cols = c('Epitoc.Epitoc', 'Epitoc.ageAcc2Epitoc')) %>%
+  mutate(name = factor(name, 
+                       levels = c('Epitoc.Epitoc', 'Epitoc.ageAcc2Epitoc'),
+                       labels = c('epiTOC-Raw', 'epiTOC-Age Adjusted'))) %>%
+  ggplot(., aes(x = value, fill = Array_type, color = Array_type)) +
+  geom_histogram(aes(y = ..density..), color = 'black', fill = 'white', alpha = .85) +
+  geom_density(alpha = .3, linewidth = .6) +
+  facet_wrap(~name, scales = 'free') +
+  scale_fill_manual(values = c('dodgerblue', '#FFAB1F')) +
+  scale_color_manual(values = c('dodgerblue', '#FFAB1F')) +
+  ylab('Density') + xlab('epiTOC estimation') +
+  scale_y_continuous(expand = expansion(mult = c(.02, 0.2))) +
+  theme_paper +
+  theme(legend.position = 'bottom')
+  
+png('output/SuppFigS3.png', res = 600, width = 5, height = 3, units = 'in')
+print(plt)
+dev.off()
+```
+
+## Tab1 
+
+Let's take a look at some descriptive statistics: 
+
+```{r }
+tmp <- df %>%
+  select(Incident_Cancer_15y, Incident_Cancer_Death_15y,
+         sex, age, dm, hta,  etoast, smoking, Array_type) 
+tmp %>%
+  compareGroups(~., method = 4) %>%
+  createTable() %>%
+  export2md()
+```
+
+## Survival curve events-cv: 
+
+Create the survival object:
+
+```{r }
+df$Incident_Cancer_15y_num <- ifelse(df$Incident_Cancer_15y == 'yes', 1, 0) 
+surv_event <- Surv(df$time_to_cancer, df$Incident_Cancer_15y_num) # event must be numeric
+m0 <- survfit(surv_event ~ 1)
+t_censor <- 15
+ggsurvplot(m0, cumevents = T, risk.table  = T, data = df, break.x.by = 1, xlim = c(0,t_censor), censor = F) 
+```
+
+```{r }
+msg <- paste0('We have ', 
+              sum(df$Incident_Cancer_15y_num), 
+              ' events with a median follow-up of ', 
+              round(median(df$time_to_cancer), 3), 
+              ' years. ')
+message(msg)
+```
+
+Compare clocks betweem arrays: 
+
+```{r}
+tmp <- df %>%
+  select(age, 
+         ageAcc2.Hannum, ageAcc2.Horvath, ageAcc2.Levine, ageAcc2.BLUP, ageAcc2.EN,
+         ageAcc4.Hannum, ageAcc4.Horvath, ageAcc4.Levine, ageAcc4.BLUP, ageAcc4.EN, 
+         Epitoc.Epitoc, Epitoc.ageAcc2Epitoc, Array_type
+         ) %>%
+  compareGroups(Array_type~., data = ., method = 1) %>%
+  createTable(.)
+export2xls(tmp, file = 'output/SuppFigs.xls')
+```
+
+
+# Effect of B-age, cell-counts and covariables on incidence of events
+
+In this section we'll start by discovering which main VRF are associated with incidence of events. Method: 
+
+- Basic Descriptive Analyses.
+
+- Cumulative Incidence function accounting for competing events.
+
+## Fig3a
+
+Let's do some descriptive analyses first: 
+
+Density plots cell counts: 
+
+```{r }
+cells <- c('Neu', 'Mono', 'Baso', 'Eos', 'CD4Tmem', 'CD4Tnv', 'CD8Tmem', 'CD8Tnv', 'Treg', 'Bmem', 'Bnv', 'NK')
+plt <- df %>%
+  select(cells) %>%
+  tidyr::pivot_longer(cells) %>%
+  ggplot(., aes(value*100, fill = name)) +
+  geom_density(alpha = .5) +
+  facet_wrap(~name, scales = 'free') +
+  scale_x_continuous(n.breaks = 3) +
+  theme_paper +
+  theme(legend.position = 'none') +
+  xlab('Estimated cell proportion') + ylab('Density')
+print(plt)
+png('output/fig3a.png', res = 600, units = 'in', width = 8, height = 5)
+print(plt)
+dev.off()
+```
+
+## Fig3b
+
+Correlation with age
+
+```{r }
+plt <- df %>%
+  select(cells, age) %>%
+  tidyr::pivot_longer(cells) %>%
+  ggplot(., aes(age, value*100, color = name)) +
+  geom_point(alpha = .15) +
+  geom_smooth(color = 'firebrick', se = F, method = 'lm') +
+  ggpubr::stat_cor(method = 'spearman', cor.coef.name = 'rho',
+                   r.accuracy	= .01, p.accuracy = .001,
+                   size = 3.5, color = 'black', digits = 2) +
+  facet_wrap(~name, scales = 'free') +
+  theme_paper +
+  theme(legend.position = 'none') +
+  xlab('Chronological age') + ylab('Estimated cell proportion')
+print(plt)
+png('output/fig3b.png', res = 600, units = 'in', width = 8, height = 5)
+print(plt)
+dev.off()
+```
+
+## Tab1
+
+```{r  }
+tmp <- df %>%
+  select(Incident_Cancer_15y, Incident_Cancer_Death_15y,
+         sex, age, dm, hta,  etoast, smoking, Array_type)  %>%
+  compareGroups(Incident_Cancer_15y~., data = ., method = 4) %>%
+  createTable() 
+export2xls(tmp, 'output/tab1.xls')
+export2md(tmp)
+```
+
+## Fig2b
+
+```{r }
+clocks <- str_subset(names(df), 'ageAcc[24]|Epitoc$|EPITOC')
+clocks <- str_subset(clocks, '[.]Horvath|Hannum|Levine|EN|BLUP|Epitoc|EPITOC')
+tmp <- df %>%
+  select(clocks, Incident_Cancer_15y) %>%
+  compareGroups(Incident_Cancer_15y~., data = ., method = 4) %>%
+  createTable() 
+export2xls(tmp, 'output/fig2b.xls')
+export2md(tmp)
+```
+
+
+
+```{r}
+clocks <- c('ageAcc2.Hannum', 
+            'ageAcc2.Horvath', 
+            'ageAcc2.Levine',
+            'ageAcc2.BLUP',
+            'ageAcc2.EN',
+            'ageAcc4.Hannum', 
+            'ageAcc4.Horvath', 
+            'ageAcc4.Levine',
+            'ageAcc4.BLUP', 
+            'ageAcc4.EN')
+
+
+plt <- df %>%
+  select(clocks, Sample_Name, Incident_Cancer_15y) %>%
+  tidyr::pivot_longer(cols = clocks) %>%
+  separate(col = name, into = c('meas', 'clock'), sep = '[.]') %>%
+  mutate(clock = factor(clock, 
+                        levels = c('Hannum',
+                                   'Horvath',
+                                   'Levine',
+                                   'BLUP', 
+                                   'EN'),
+                       labels = c('Hannum', 
+                                  'Horvath', 
+                                  'PhenoAge', 
+                                  'Zhang-BLUP', 
+                                  'Zhang-EN')),
+         meas = factor(meas, 
+                        levels = c('ageAcc2',
+                                   'ageAcc4'),
+                        labels = c('EEAA', 
+                                   'IEAA'))) %>%
+  ggplot(., aes(x = Incident_Cancer_15y,
+                y = value, 
+                fill = interaction( meas, clock),
+                linetype = meas)) +
+  geom_violin(alpha = .55) + 
+  geom_boxplot(fill = 'white', 
+               width = .3, 
+               outlier.alpha = 0) +
+  scale_linetype_manual(values = c('solid', 'dashed', 'solid')) +
+  facet_wrap(meas~clock, scales = 'free', nrow =2 ) +
+  ylab('Age acceleration') + xlab('Cancer') +
+  scale_y_continuous(expand = expansion(mult = c(.05, 0.2))) +
+  scale_fill_brewer(palette = 'Paired') +
+  theme_paper2 +
+  theme(legend.position = 'none')
+    
+png('output/fig2b.png', res = 600, width = 14, height = 6, units = 'in')
+print(plt)
+dev.off()  
+```
+
+```{r}
+clocks <- c('Epitoc.ageAcc2Epitoc', 
+            'Epitoc.Epitoc')
+
+plt <- df %>%
+  select(clocks, Sample_Name, Incident_Cancer_15y) %>%
+  tidyr::pivot_longer(cols = clocks) %>%
+  separate(col = name, into = c('meas', 'clock'), sep = '[.]') %>%
+  mutate(clock = factor(clock, 
+                        levels = c('Epitoc',
+                                   'ageAcc2Epitoc'),
+                       labels = c('Raw', 
+                                  'Age-adjusted')),
+         meas = factor(meas, 
+                        levels = c('Epitoc'),
+                        labels = c('Epitoc'))) %>%
+  ggplot(., aes(x = Incident_Cancer_15y,
+                y = value, 
+                fill = interaction( meas, clock),
+                linetype = clock)) +
+  geom_violin(alpha = .55) + 
+  geom_boxplot(fill = 'white', 
+               width = .3, 
+               outlier.alpha = 0) +
+  scale_linetype_manual(values = c('solid', 'dashed', 'solid')) +
+  facet_wrap(meas~clock, scales = 'free', nrow =2 ) +
+  ylab('Age acceleration') + xlab('Cancer') +
+  # scale_y_continuous(expand = expansion(mult = c(.05, 0.2))) +
+  scale_fill_manual(values = c("#FFFF99", "#B15928")) +
+  theme_paper2 +
+  theme(legend.position = 'none')
+    
+png('output/fig2bEpitoc.png', res = 600, width = 3, height = 6, units = 'in')
+print(plt)
+dev.off()  
+```
+
+## Fig3c
+
+Let's check now the differences in cell types:
+
+```{r }
+cells <- c('Neu', 'Mono', 'Baso', 'Eos', 'CD4Tmem', 'CD4Tnv', 'CD8Tmem', 'CD8Tnv', 'Treg', 'Bmem', 'Bnv', 'NK')
+for(c in cells){
+  df[,c] <- df[,c]*100
+}
+
+tmp <- df %>%
+  select(cells, Incident_Cancer_15y) %>%
+  compareGroups(Incident_Cancer_15y~., data = ., method = 4) %>%
+  createTable() 
+export2xls(tmp, 'output/fig3c.xls')
+export2md(tmp)
+```
+
+We observe differences in some cellular types. 
+
+Let's check the plots: 
+
+```{r, fig.width=9, fig.height=9, fig.align='center'}
+plt <- df %>%
+  select(cells, Incident_Cancer_15y) %>%
+  tidyr::pivot_longer(cols = cells) %>%
+  ggplot(., aes(Incident_Cancer_15y, value, fill = name)) +
+  geom_violin(alpha = .75, position = position_dodge(.75)) + 
+  geom_boxplot(fill = 'white', width = .3, outlier.alpha = 0, position = position_dodge(.75)) + 
+  facet_wrap(~name, scales = 'free', nrow = 1) +
+  theme_classic() +
+  # scale_fill_manual(values = c('dodgerblue', '#FFAB1F')) +
+  xlab('Cancer') + ylab('Estimated cell proportion') + theme(legend.position = 'bottom') +
+  labs(fill = 'Cancer') +
+  scale_y_continuous(expand = expansion(mult = c(.05, 0.2))) +
+  theme_paper2 +
+  theme(legend.position = 'none')
+  
+plt 
+png('output/fig3c.png', res = 600, width = 20, height = 3, units = 'in')
+print(plt)
+dev.off()  
+```
+
+## Cumulative incidence function
+
+A lot of patients are dying to other causes. We are going to study the cumulative incidence function to account for the event of interest. 
+
+We first calculate ageAcc variables_tert
+
+```{r }
+clocks_main_acc <- c(paste0('ageAcc2.', c(clocks_main)),paste0('ageAcc4.', c(clocks_main))) 
+clocks_main_acc <- c(clocks_main_acc, 'Epitoc.Epitoc', 'Epitoc.ageAcc2Epitoc')
+for(var in clocks_main_acc){
+  aux <- paste0(var, '_tert')
+  # whole sample
+  brks <- as.numeric(quantile(df[,var], probs = c(0, .33, .66, 1), na.rm = T))
+  df[,aux] <- cut(df[,var], breaks = brks, include.lowest = T, labels = paste0('T', 1:3), right = T)
+}
+```
+
+### SuppTab S3
+
+```{r }
+df <- df %>%
+  mutate(Incident_Cancer_Death_15y_num = recode(Incident_Cancer_Death_15y,
+                                                `no` = 0,
+                                                `cancer` = 1, 
+                                                `death_other` = 2))
+df$age_median <- ifelse(df$age > median(df$age), '>73', '<=73')
+df$edat_tertile <- cut(df$age, 
+                       breaks = quantile(df$age, probs = c(0,.25,.5, .75, 1)),
+                       include.lowest = T,
+                       right = T)
+vars <- c('age_median', 'edat_tertile', 'sex', 'hta', 'dm', 'etoast', 'hemorrhagic', 'smoking', 'Array_type')
+run_series_ci('time_to_cancer', 'Incident_Cancer_Death_15y_num', df, NULL, vars, 'clinical variables')
+tmp <- run_series_ci('time_to_cancer', 'Incident_Cancer_Death_15y_num', df, NULL, vars, 'clinical variables', report = F)
+write.table(tmp, file = 'output/supptabS3.txt', sep = ';')
+```
+
+- After accounting for competing events, looks like only sex is associated with a higher risk of cancer. 
+
+- Regarding the competing event, acxfa, age, smoking and hta are all associated with death of any cause (before cancer). 
+
+### SuppTab S4
+
+```{r }
+clocks_main_acc <- c(paste0('ageAcc2.', clocks_main), paste0('ageAcc4.', clocks_main))
+clocks_main_acc <- c(clocks_main_acc, 'Epitoc.Epitoc', 'Epitoc.ageAcc2Epitoc')
+clocks_main_acc_tert <- paste0(clocks_main_acc, '_tert')
+
+run_series_ci('time_to_cancer', 'Incident_Cancer_Death_15y_num', df, NULL, clocks_main_acc_tert, 'clinical variables')
+tmp <- run_series_ci('time_to_cancer', 'Incident_Cancer_Death_15y_num', df, NULL, clocks_main_acc_tert, 'clinical variables', report = F)
+write.table(tmp, file = 'output/SuppTabS4.txt', sep = ';')
+```
+
+
+- Regarding risk of cancer, we observe more or less the same take-home-message as before, although associations look attenuated. 
+
+- On the other hand, hannum & blup age acc are associated with the competing event. 
+
+## Fig4
+
+Let's check the effect of Hannum on the incidence of cancer: 
+
+```{r, fig.width=6, fig.height=6, fig.align='center'}
+df$ageAcc2.Hannum_tert <- factor(df$ageAcc2.Hannum_tert, 
+                                 levels = c('T1', 'T2', 'T3'),
+                                 labels = c('Hannum-Tertile 1',
+                                            'Hannum-Tertile 2',
+                                            'Hannum-Tertile 3')) 
+plt <- cuminc(Surv(time_to_cancer, factor(Incident_Cancer_15y_num)) ~ ageAcc2.Hannum_tert	, df) %>%
+  ggsurvfit::ggcuminc() +
+  ggsurvfit::add_confidence_interval() +
+  ggsurvfit::add_risktable(size = 5,
+                           color = 'black') +
+  scale_color_manual(values = c('#1FFFF9', '#1F8FFF', '#FFAB1F')) +
+  scale_fill_manual(values = c('#1FFFF9', '#1F8FFF', '#FFAB1F')) +
+  theme_paper2 + 
+  theme(legend.position = 'bottom',
+        legend.text = element_text(color = 'black',
+                                   size = 12))
+
+
+plt
+png('output/fig4a.png', res = 600, width = 7, height = 8, units = 'in')
+print(plt)
+dev.off()
+```
+
+Let's also obtain the whole incidence: 
+
+```{r, fig.width=6, fig.height=6, fig.align='center'}
+plt <- cuminc(Surv(time_to_cancer, factor(Incident_Cancer_15y_num)) ~ 1	, df) %>%
+  ggsurvfit::ggcuminc() +
+  ggsurvfit::add_confidence_interval() +
+  ggsurvfit::add_risktable(size = 5.5, 
+                           color = 'black') +
+  scale_color_manual(values = '#1F8FFF') +
+  scale_fill_manual(values = '#1F8FFF') +
+  theme_paper2 + 
+  theme(legend.position = 'bottom',
+        legend.text = element_text(color = 'black',
+                                   size = 12))
+
+plt
+png('output/fig4b.png', res = 600, width = 6, height = 5, units = 'in')
+print(plt)
+dev.off()
+```
+
+
+# Effect of AgeAcc on risk of events (continuous variable)
+
+In the previous analyses we just scratched the surface. Let's check whether exists a continuous association between age acceleration and risk of events after adjusting for sex. 
+
+## Multivariate Models 
+
+```{r }
+# scale epitoc
+df$Epitoc.ageAcc2Epitoc <- as.numeric(scale(df$Epitoc.ageAcc2Epitoc))
+df$Epitoc.Epitoc <- as.numeric(scale(df$Epitoc.Epitoc))
+# 
+
+clocks_main_acc <- c(paste0('ageAcc2.', c(clocks_main)),  paste0('ageAcc4.', c(clocks_main)), 'Epitoc.Epitoc', 'Epitoc.ageAcc2Epitoc')
+
+series_cox_multi(df, 'surv_event', clocks_main_acc, c( 'sex'), 'AgeAcc2-4')
+modCox <- series_cox_multi(df, 'surv_event', clocks_main_acc, c('sex'), 'AgeAcc2', report=F)
+write.csv(modCox, 'output/multi_cox_ageacc2.csv')
+```
+
+
+```{r }
+aux <- str_split( modCox$`HR (95% CI)`, ' \\(|\\)|;', simplify = T)
+colnames(aux) <- c('hr', 'low_ci', 'high', '')
+modCox <- cbind(modCox, aux)
+modCox$mod <- 'Cox'
+```
+
+## Interaction
+
+### Sex 
+
+Check whether the effect of age acceleration on incidence of cancer is moderated by sex.
+
+```{r }
+clocks_main_acc <- c(paste0('ageAcc2.', c(clocks_main)),  paste0('ageAcc4.', c(clocks_main)), 'Epitoc.Epitoc', 'Epitoc.ageAcc2Epitoc')
+
+df$sex_male <- ifelse(df$sex == 'male', 1, 0)
+p_out <- c()
+hr_out <- c()
+hr_h_out <- c()
+hr_l_out <- c()
+for(clock in clocks_main_acc){
+  f <- as.formula(paste0('surv_event~', '+sex_male*', clock))
+  m_tmp <- coxph(f, df)
+  tmp <- summary(m_tmp)$coefficient
+  tmp_ci <- exp(confint(m_tmp))
+  p <- tmp[paste0('sex_male:', clock),5]
+  hr <- tmp[paste0('sex_male:', clock),2]
+  hr_l <- tmp_ci[paste0('sex_male:', clock),1]
+  hr_h <- tmp_ci[paste0('sex_male:', clock),2]
+  p_out <- c(p_out, p)
+  hr_out <- c(hr_out, hr)
+  hr_l_out <- c(hr_l_out, hr_l)
+  hr_h_out <- c(hr_h_out, hr_h)
+}
+m <- data.frame(row.names = clocks_main_acc, 
+                p_interaction = p_out, 
+                hr = hr_out,
+                hr_h = hr_h_out, 
+                hr_l = hr_l_out)
+m %>%
+  explor_tab(., 'Interaction between age acceleration & sex')
+write.csv(m, 'output/interaction_sex.csv')
+sexInt <- m
+```
+
+### Array type
+
+```{r }
+p_out <- c()
+hr_out <- c()
+hr_h_out <- c()
+hr_l_out <- c()
+for(clock in clocks_main_acc){
+  f <- as.formula(paste0('surv_event~', 'sex_male+Array_type*', clock))
+  m_tmp <- coxph(f, df)
+  tmp <- summary(m_tmp)$coefficient
+  tmp_ci <- exp(confint(m_tmp))
+  p <- tmp[paste0('Array_typeEPIC:', clock),5]
+  hr <- tmp[paste0('Array_typeEPIC:', clock),2]
+  hr_l <- tmp_ci[paste0('Array_typeEPIC:', clock),1]
+  hr_h <- tmp_ci[paste0('Array_typeEPIC:', clock),2]
+  p_out <- c(p_out, p)
+  hr_out <- c(hr_out, hr)
+  hr_l_out <- c(hr_l_out, hr_l)
+  hr_h_out <- c(hr_h_out, hr_h)
+}
+m <- data.frame(row.names = clocks_main_acc, 
+                p_interaction = p_out, 
+                hr = hr_out,
+                hr_h = hr_h_out, 
+                hr_l = hr_l_out)
+m %>%
+  explor_tab(., 'Interaction between age acceleration & batch')
+write.csv(m, 'output/interaction_batch.csv')
+batchInt <- m
+```
+
+### STROKE TYPE
+
+```{r }
+p_out <- c()
+hr_out <- c()
+hr_h_out <- c()
+hr_l_out <- c()
+for(clock in clocks_main_acc){
+  f <- as.formula(paste0('surv_event~', '+sex_male+hemorrhagic*', clock))
+  m_tmp <- coxph(f, df)
+  tmp <- summary(m_tmp)$coefficient
+  tmp_ci <- exp(confint(m_tmp))
+  p <- tmp[paste0('hemorrhagicyes:', clock),5]
+  hr <- tmp[paste0('hemorrhagicyes:', clock),2]
+  hr_l <- tmp_ci[paste0('hemorrhagicyes:', clock),1]
+  hr_h <- tmp_ci[paste0('hemorrhagicyes:', clock),2]
+  p_out <- c(p_out, p)
+  hr_out <- c(hr_out, hr)
+  hr_l_out <- c(hr_l_out, hr_l)
+  hr_h_out <- c(hr_h_out, hr_h)
+}
+m <- data.frame(row.names = clocks_main_acc, 
+                p_interaction = p_out, 
+                hr = hr_out,
+                hr_h = hr_h_out, 
+                hr_l = hr_l_out)
+m %>%
+  explor_tab(., 'Interaction between age acceleration & HEMORR')
+write.csv(m, 'output/interaction_hemorr.csv')
+hemoInt <- m
+```
+
+### Fig5b
+
+```{r }
+sexInt$var <- 'Sex'
+sexInt$Predictor <- row.names(sexInt)
+hemoInt$var <- 'Stroke type'
+hemoInt$Predictor <- row.names(hemoInt)
+batchInt$var <- 'Array type'
+batchInt$Predictor <- row.names(batchInt)
+
+res <- rbind(sexInt, hemoInt, batchInt)
+res$Predictor <- str_replace_all(res$Predictor, 'Epitoc.Epitoc', 'ageAcc2.Epitoc')
+res$Predictor <- str_replace_all(res$Predictor, 'Epitoc.ageAcc2Epitoc', 'ageAcc4.Epitoc')
+
+res$type <- str_remove_all(res$Predictor, '[.].*$')
+
+
+res$type <- factor(res$type, 
+                   levels = c('ageAcc2', 'ageAcc4', 'epiTOC'),
+                   labels = c('EEAA', 'IEAA', 'epiTOC'))
+res$name <- str_remove_all(res$Predictor, '^.*[.]')
+res$name <- factor(res$name, 
+                   levels = c('Hannum', 
+                              'Horvath',
+                              'Levine',
+                              'EN',
+                              'BLUP',
+                              'Epitoc'),
+                   labels =c('Hannum', 
+                             'Horvath',
+                             'PhenoAge',
+                             'Zhang-EN',
+                             'Zhang-BLUP',
+                             'epiTOC'))
+
+plt <- res %>%
+  mutate(var = factor(var, levels = c('Sex', 'Stroke type', 'Array type'))) %>%
+  # filter(type != 'Epitoc') %>%
+  ggplot(., aes(name, hr, fill = interaction(type, name), group = interaction(type, name))) +
+  geom_errorbar(mapping = aes(ymin = hr_h, ymax = hr_l), width = .2,  color = 'black', position = position_dodge(.5)) +
+  geom_hline(aes(yintercept = 1), linetype = 'dashed', color = 'firebrick') +
+  geom_point(shape = 21, size = 3,  color = 'black', position = position_dodge(.5)) +
+  scale_y_log10() +
+  facet_wrap(~var) +
+  scale_fill_brewer(palette = 'Paired') +
+  theme_paper2 +
+  theme(legend.position = 'none') + ylab('Hazzard Ratio') + xlab('') +
+  theme(axis.text.x = element_text(angle = 35, vjust = 1, hjust = 1))
+
+png('output/fig5b.png', res = 600, units = 'in', width = 12, height = 5)
+print(plt)
+dev.off()
+```
+
+## Fine-Gray's Models - Competing events
+
+```{r }
+series_fineGray_multi(df, 'time_to_cancer', 'Incident_Cancer_Death_15y_num',
+                      clocks_main_acc, c('sex'), 'AgeAcc2')
+modGray <- series_fineGray_multi(df, 'time_to_cancer', 'Incident_Cancer_Death_15y_num',
+                      clocks_main_acc, c( 'sex'), 'AgeAcc2', report = F)
+write.csv(modGray, 'output/multi_fineGray_ageacc2.csv')
+```
+
+
+```{r }
+aux <- str_split( modGray$`HR (95% CI)`, ' \\(|\\)|;', simplify = T)
+colnames(aux) <- c('hr', 'low_ci', 'high', '')
+modGray <- cbind(modGray, aux)
+modGray$mod <- 'Fine-Gray'
+```
+
+```{r eval=FALSE, include=FALSE}
+aux <- str_split( modCox$`HR (95% CI)`, ' \\(|\\)|;', simplify = T)
+colnames(aux) <- c('hr', 'low_ci', 'high', '')
+modCox <- cbind(modCox, aux)
+modCox$mod <- 'Cox'
+```
+
+## Fig5b 
+
+### Age Acceleration
+
+```{r }
+res <- rbind(modCox, modGray)
+res$type <- str_remove_all(res$Predictor, '[.].*$')
+res$type <- factor(res$type, 
+                   levels = c('ageAcc2', 'ageAcc4', 'Epitoc'),
+                   labels = c('EEAA', 'IEAA', 'epiTOC'))
+res$name <- str_remove_all(res$Predictor, '^.*[.]')
+res$name <- factor(res$name, 
+                   levels = c('Hannum', 
+                              'Horvath',
+                              'Levine',
+                              'EN',
+                              'BLUP',
+                              'Epitoc',
+                              'ageAcc2Epitoc'),
+                   labels =c('Hannum', 
+                             'Horvath',
+                             'PhenoAge',
+                             'Zhang-EN',
+                             'Zhang-BLUP',
+                             'Raw',
+                             'Age-adjusted'))
+
+res$sign <- ifelse(res$`Q-value` < .05, 'FDR-significant', 'Not FDR-signiticant')
+res$hr <- as.numeric(res$hr)
+res$low_ci <- as.numeric(res$low_ci)
+res$high <- as.numeric(res$high)
+
+plt <- res %>%
+  filter(type != 'epiTOC') %>%
+  ggplot(., aes(hr, name, fill = interaction(type, name), color = interaction(type, name))) +
+  geom_vline(aes(xintercept = 1), linetype = 'dashed', color = 'firebrick') +
+  geom_errorbarh(mapping = aes(xmin = low_ci, xmax = high), height = .2,  color = 'black') +
+  geom_point(shape = 21, size = 3,  color = 'black') +
+  scale_x_continuous(limits = c(0.9,1.2)) +
+  facet_wrap(mod~type) +
+  scale_fill_brewer(palette = 'Paired') +
+  scale_color_brewer(palette = 'Paired') +
+  theme_paper2 +
+  theme(legend.position = 'none') + ylab('') + xlab('Hazzard Ratio')
+
+print(plt)
+png('output/fig5a.png', res = 600, units = 'in', width = 8, height = 5)
+print(plt)
+dev.off()
+```
+
+### Epitoc
+
+```{r}
+
+plt <- res %>%
+  filter(type == 'epiTOC') %>%
+  ggplot(., aes(hr, name, fill = interaction(type, name), color = interaction(type, name))) +
+  geom_vline(aes(xintercept = 1), linetype = 'dashed', color = 'firebrick') +
+  geom_errorbarh(mapping = aes(xmin = low_ci, xmax = high), height = .2,  color = 'black') +
+  geom_point(shape = 21, size = 3,  color = 'black') +
+  scale_x_continuous(limits = c(0.9,1.75)) +
+  facet_wrap(mod~type, nrow = 2) +
+  scale_fill_manual(values = c('#FFFF99', '#B15928')) +
+  scale_color_manual(values = c('#FFFF99', '#B15928')) +
+  theme_paper2 +
+  theme(legend.position = 'none') + ylab('') + xlab('Hazzard Ratio')
+
+print(plt)
+png('output/fig5aEpitoc.png', res = 600, units = 'in', width = 4, height = 5)
+print(plt)
+dev.off()
+```
+
+### SuppTab S6
+
+```{r}
+mZhang_eeaa_female <- coxph(Surv(time_to_cancer, Incident_Cancer_15y_num) ~ sex_male*ageAcc2.BLUP, df)
+mZhang_ieaa_female <- coxph(Surv(time_to_cancer, Incident_Cancer_15y_num) ~ sex_male*ageAcc4.BLUP, df)
+df$sex_female <- ifelse(df$sex == 'female', 1, 0)
+mZhang_eeaa_male <- coxph(Surv(time_to_cancer, Incident_Cancer_15y_num) ~ sex_female*ageAcc2.BLUP, df)
+mZhang_ieaa_male <- coxph(Surv(time_to_cancer, Incident_Cancer_15y_num) ~ sex_female*ageAcc4.BLUP, df)
+```

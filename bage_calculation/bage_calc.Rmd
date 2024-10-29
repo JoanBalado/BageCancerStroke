@@ -1,0 +1,231 @@
+---
+title: "B-age calculation"
+output: html_document
+date: "2024-10-29"
+---
+
+# 0. Load Libraries
+
+```{r setup, include=FALSE}
+# data management
+library(dplyr)
+library(stringr)
+
+# data analysis
+library(Hmisc)
+library(rstatix)
+
+# data visualization
+library(ggplot2)
+library(kableExtra)
+library(knitr)
+
+# B-age
+library(methylclock)
+library(EpiDISH)
+
+# functions 
+explore_df <- function(df){
+  aux <- dim(df)
+  message(paste0('Dataframe has:\n\tRows: ', aux[1], '\n\tCols: ', aux[2]))
+}
+
+blue0.5 <- scales::alpha('dodgerblue', .5)
+hist_fun <- function(x, data){
+  hist(data[,x], main = x, xlab = '', ylab = '', freq = F, col = blue0.5)
+  lines(density(data[,x], na.rm = T))
+}
+
+knitr::knit_hooks$set(
+   error = function(x, options) {
+     paste('\n\n<div class="alert alert-danger">',
+           gsub('##', '\n', gsub('^##\ Error', '**Error**', x)),
+           '</div>', sep = '\n')
+   },
+   warning = function(x, options) {
+     paste('\n\n<div class="alert alert-warning">',
+           gsub('##', '\n', gsub('^##\ Warning:', '**Warning**', x)),
+           '</div>', sep = '\n')
+   },
+   message = function(x, options) {
+     paste('\n\n<div class="alert alert-info">',
+           gsub('##', '\n', x),
+           '</div>', sep = '\n')
+   }
+)
+
+explore_tab <- function(df, lab){
+  df %>%
+  kable(., 
+        align = rep('c', ncol(.)), 
+        caption = lab) %>%
+  kable_classic_2(full_width = F, html_font = 'cambria')
+}
+```
+
+  
+# 1. Data import
+
+Steps for data import:
+
+- Import betas file from: https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE280206
+
+- Split betas file into 450K and EPIC using GEO metadata
+
+- Create a "CpGName" variable at the beginning of each matrix (see methylclock documentation)
+
+- Request access to phenotypic data (C-age) from: 10.5281/zenodo.13981377
+
+```{r}
+# 450K array
+c_age_450K # vector with patients' c-age (only 450K patients)
+betas_450K # matrix 450K betas
+
+# EPIC array
+c_age_EPIC # vector with patients' c-age (only EPIC patients)
+betas_EPIC # matrix epic betas
+
+```
+
+# 2. Basic Epigenetic clocks
+
+## 450K Batch
+
+```{r }
+cpgs.missing <- checkClocks(betas_450K)
+```
+
+Looks great.
+
+## EPIC Batch
+
+```{r }
+cpgs.missing <- checkClocks(betas_EPIC)
+```
+
+Hannum' and Horvat's clocks have a relatively high proportion of missing CpGs, although acceptable (<20%). This is something expected in EPIC chip. 
+
+# 2. B-Age calculation
+
+## 2.1. 450K Batch
+
+We now calculate the clocks and plot them against chrono-age.
+
+**Hannum and TL clocks show an important number of missing cpgs**. BNN cannot be computed (>1 missing cpg horvath). 
+
+```{R include=FALSE}
+Bage_450K <- DNAmAge(betas_450K, 
+                     age = c_age_450K, 
+                     min.perc = 0.3, 
+                     clocks = c('Horvath', 'Hannum', 'Levine', 'BNN',
+                                'skinHorvath', 'PedBE', 'Wu', 'TL', 
+                                'BLUP', 'EN'))
+```
+
+Performance of main clocks (we exclude skin and pediatric clocks):
+
+```{r, fig.width=8, fig.height=5, fig.align='center'}
+Bage_450K %>%
+  select(age, Hannum, Horvath, Levine, BLUP, EN, TL) %>%
+  tidyr::pivot_longer(cols = c('Hannum', 'Horvath', 'Levine', 'BLUP', 'EN', 'TL')) %>%
+  ggplot(., aes(age, value)) +
+  geom_point(alpha = .3) +
+  geom_smooth(method = 'lm', se = F, color = 'firebrick') +
+  facet_wrap(~name, scales = 'free') +
+  ggpubr::stat_cor(method = 'pearson') +
+  theme_classic() +
+  theme(legend.position = 'bottom')
+```
+
+## 2.2. EPIC
+
+Now repeat the same for EPIC
+
+```{R include=FALSE}
+Bage_EPIC <- DNAmAge(betas_EPIC, 
+                     age = c_age_EPIC, 
+                     min.perc = 0.3, 
+                     clocks = c('Horvath', 'Hannum', 'Levine', 'BNN',
+                                'skinHorvath', 'PedBE', 'Wu', 'TL',
+                                'BLUP', 'EN'))
+```
+
+Performance of main clocks:
+
+```{r, fig.width=8, fig.height=5, fig.align='center'}
+Bage_EPIC %>%
+  select(age, Hannum, Horvath, Levine, BLUP, EN, TL) %>%
+  tidyr::pivot_longer(cols = c('Hannum', 'Horvath', 'Levine', 'BLUP', 'EN', 'TL')) %>%
+  ggplot(., aes(age, value)) +
+  geom_point(alpha = .3) +
+  geom_smooth(method = 'lm', se = F, color = 'firebrick') +
+  facet_wrap(~name, scales = 'free') +
+  ggpubr::stat_cor(method = 'pearson') +
+  theme_classic() 
+```
+
+# 3. EPITOC
+
+Finally, we'll calculate EPITOC: 
+
+- https://rdrr.io/github/metamaden/cgageR/
+
+- https://genomemedicine.biomedcentral.com/articles/10.1186/s13073-020-00752-3
+
+We don't need thje cpg Name: 
+
+```{r }
+betas_EPIC$CpGName <- NULL
+betas_450K$CpGName <- NULL
+
+if(all(colnames(betas_450K) == Bage_450K$id)){
+  message('Files are correctly arranged for 450K')
+} else  stop('Arrange files for 450k')
+if(all(colnames(betas_EPIC) == Bage_EPIC$id)) {
+  message('Files are correctly arranged for epic')
+} else stop('Arrange files for EPIC')
+```
+
+## 3.1. 450K
+
+### CgageR
+
+First method of calculation using *cgageR* library:
+
+```{r }
+library(cgageR)
+
+Bage_450K$Epitoc <- getAgeR(betas_450K, epitoc = T)$EpiTOC.output[['EpiTOC.Est']]$EpiTOC.Est
+```
+
+```{r, fig.width=3, fig.height=3, fig.align='center'}
+Bage_450K %>%
+  ggplot(., aes(age, Epitoc)) +
+  geom_point(alpha = .3) +
+  geom_smooth(method = 'lm', se = F, color = 'firebrick') +
+  ggpubr::stat_cor(method = 'pearson') +
+  theme_classic()
+```
+
+We don't expect a high correlation between C-Age and B-age in this clock. Please, REVIEW the manuscript: https://genomebiology.biomedcentral.com/articles/10.1186/s13059-016-1064-3 
+**>>Supplemental file 3<<**
+
+## 3.2. EPIC
+
+### CGAGER
+
+```{r }
+library(cgageR)
+Bage_EPIC$Epitoc <- getAgeR(betas_EPIC, epitoc = T)$EpiTOC.output[['EpiTOC.Est']]$EpiTOC.Est
+```
+
+```{r, fig.width=3, fig.height=3, fig.align='center'}
+Bage_EPIC %>%
+  ggplot(., aes(age, Epitoc)) +
+  geom_point(alpha = .3) +
+  geom_smooth(method = 'lm', se = F, color = 'firebrick') +
+  ggpubr::stat_cor(method = 'pearson') +
+  theme_classic()
+```
+
+# 4. Save!
