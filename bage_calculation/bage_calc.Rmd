@@ -95,7 +95,6 @@ betas_EPIC # matrix epic betas
 cpgs.missing <- checkClocks(betas_450K)
 ```
 
-Looks great.
 
 ## EPIC Batch
 
