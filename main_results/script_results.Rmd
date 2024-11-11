@@ -341,7 +341,7 @@ df <- data.frame(data.table::fread('input/pheno.csv'))
 
 Cases with an age acceleration higher than |3SDs| were trimmed to min/max (3SD): 
 
-Now let's take a look to age acceleration (intrinsic) in the main clocks: 
+Now let's take a look to age acceleration in the main clocks: 
 
 ```{r, fig.width=9, fig.height=6, fig.align='center'}
 par(mfrow = c(2,3))
